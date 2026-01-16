@@ -9,7 +9,6 @@ import torch.nn.functional as F
 
 from services.utils import update_ema
 from services.tools import create_logger
-from services.reward_models import RewardModelWrapper, compute_reward_gradients
 
 logger = create_logger(__name__)
 
@@ -29,15 +28,6 @@ class TwinFlow(torch.nn.Module):
         loss_func_type: dict = {"type": "barron_reweighting"},
         dist_match_cof: float = 0.5,
         use_image_free: bool = False,
-        # --- RL Params ---
-        use_rl: bool = False,
-        rl_warmup_steps: int = 2000,  # Start RL after cold start
-        rl_weight: float = 0.1,
-        reward_model_type: str = "hpsv2",
-        reward_model_cache: str = None,
-        # --- Dynamic Cold Start Parameters ---
-        use_dynamic_renoise: bool = False,
-        renoise_schedule: List[float] = [0.8, 0.2, 3000],  # [start_bias, end_bias, total_steps]
         **kwargs,
     ):
         super().__init__()
@@ -53,18 +43,6 @@ class TwinFlow(torch.nn.Module):
         self.lfa = loss_func_args
         self.dmc = dist_match_cof
         self.uif = use_image_free
-
-        # RL setup
-        self.use_rl = use_rl
-        self.rl_warmup_steps = rl_warmup_steps
-        self.rl_weight = rl_weight
-        self.reward_model = None  # Lazy init in training
-        self.reward_model_type = reward_model_type
-        self.reward_model_cache = reward_model_cache
-
-        # Dynamic renoise setup
-        self.use_dynamic_renoise = use_dynamic_renoise
-        self.renoise_schedule = renoise_schedule
 
         assert self.eso >= 0, "Only support estimate_order >= 0"
 
@@ -95,37 +73,6 @@ class TwinFlow(torch.nn.Module):
 
     def gamma_to(self, t):
         return -1
-
-    def get_dynamic_renoise_bias(self, step: int) -> float:
-        """
-        Compute dynamic renoise bias following DMDR's DynaRS.
-        Starts with high noise bias, gradually shifts to uniform.
-        """
-        if not self.use_dynamic_renoise:
-            return 0.0
-
-        start_bias, end_bias, total_steps = self.renoise_schedule
-        progress = min(step / total_steps, 1.0)
-
-        # Exponential decay from start to end
-        current_bias = start_bias * (1.0 - progress) + end_bias * progress
-        return current_bias
-
-    def sample_renoise_time_dynamic(self, x: torch.Tensor, step: int) -> torch.Tensor:
-        """
-        Sample renoise time with dynamic bias toward higher noise levels early in training.
-        """
-        bias = self.get_dynamic_renoise_bias(step)
-
-        if bias > 0:
-            # Sample with bias toward higher t (more noise)
-            # Use Beta distribution: Beta(1, bias) skews toward 1
-            t = self.sample_beta(1.0, bias, x)
-        else:
-            # Uniform sampling (standard TwinFlow)
-            t = self.sample_beta(1.0, 1.0, x)
-
-        return t
 
     def sample_beta(self, theta_1, theta_2, x):
         size = [x.size(0)] + [1] * (len(x.shape) - 1)
@@ -170,17 +117,10 @@ class TwinFlow(torch.nn.Module):
         x: torch.Tensor,
         c: List[torch.Tensor],
         e: List[torch.Tensor],
-        step: int = 0, # for dynamic scheduling
     ):
         # 1. Init time and containers
         bsz, device = x.shape[0], x.device
         assert bsz >= 4 # we need minimal batch=4 to assign different target time, see L132
-        # dynamic renoise sampling
-        if self.use_dynamic_renoise:
-            t = self.sample_renoise_time_dynamic(x, step).clamp_(0, 1) * self.tdc[2]
-        else:
-            t = self.sample_beta(self.tdc[0], self.tdc[1], x).clamp_(0, 1) * self.tdc[2]
-
         t = self.sample_beta(self.tdc[0], self.tdc[1], x).clamp_(0, 1) * self.tdc[2]
         c = [torch.zeros_like(t)] if c is None else c
         e = [torch.zeros_like(t)] if e is None else e
@@ -353,40 +293,6 @@ class TwinFlow(torch.nn.Module):
         x_grad = x_grad.to(torch.float32).clamp(min=-1.0, max=1.0)
         return x_grad, F_grad
 
-    @torch.no_grad()
-    def compute_rl_gradients(
-        self,
-        model: nn.Module,
-        fake_samples: torch.Tensor,  # x_fake from adversarial generation
-        prompts: list[str],
-        step: int,
-    ) -> torch.Tensor:
-        """
-        Compute RL gradients using reward model.
-        Only activates after warmup period.
-        """
-        # Check if RL should be active
-        if not self.use_rl or step < self.rl_warmup_steps:
-            return torch.zeros_like(fake_samples)
-
-        # Lazy init reward model
-        if self.reward_model is None:
-            self.reward_model = RewardModelWrapper(
-                reward_type=self.reward_model_type,
-                device=fake_samples.device,
-                cache_dir=self.reward_model_cache,
-            )
-            logger.info(f"Initialized reward model: {self.reward_model_type}")
-
-        # Compute gradients through reward model
-        rl_grads = compute_reward_gradients(
-            self.reward_model,
-            fake_samples,
-            prompts,
-        )
-
-        return rl_grads
-
     def training_step(
         self,
         model: Union[nn.Module, Callable],
@@ -395,12 +301,9 @@ class TwinFlow(torch.nn.Module):
         e: List[torch.Tensor],
         step: int,
         v: torch.Tensor,
-        prompts: list[str] = None,  # NEW: need prompts for reward
     ):
         with torch.no_grad():
-            x_t, t, tt, c, e, target, sample_masks = self.prepare_inputs(
-                model, x, c, e, step=step  # Pass step
-            )
+            x_t, t, tt, c, e, target, sample_masks = self.prepare_inputs(model, x, c, e)
 
         loss, rng_state = 0, torch.cuda.get_rng_state()
         x_wc_t, z_wc_t, F_th_t, den_t = self.forward(model, x_t, t, tt, **dict(c=c))
@@ -421,7 +324,7 @@ class TwinFlow(torch.nn.Module):
             if self.emd == 1.0 and self.uif:
                 target[idx] = (target - target_)[idx] + refer_v[idx]
 
-        # Start optimizing RCGM-based or multi-step generation
+        # Start optimizing RCGM-based or multi-step generation (if self.eso = 0)
         rcgm_idx = sample_masks["e2e"] | sample_masks["any"]
         if (self.eso >= 1) and (self.cor != 0.0) and (rcgm_idx.any()):
             model_4_rcgm = self.mod if (self.emd != 1.0) else model
@@ -439,40 +342,10 @@ class TwinFlow(torch.nn.Module):
             rcgm_idx = ~(sample_masks["adv"])
             target[rcgm_idx] = rcgm_target[rcgm_idx]
 
-        # ==================== NEW: RL INTEGRATION ====================
-        # Compute RL gradients for fake samples (adversarial mask)
-        rl_loss = 0
-        if self.use_rl and sample_masks["adv"].any():
-            # Extract fake samples generated in prepare_inputs
-            fake_mask = sample_masks["adv"]
-            fake_samples = x_wc_t[fake_mask]  # These are the generated fakes
-
-            # Get prompts for fake samples
-            if prompts is not None:
-                fake_prompts = [prompts[i] for i in range(len(prompts)) if fake_mask[i]]
-
-                # Compute RL gradients through reward model
-                rl_grads = self.compute_rl_gradients(
-                    model, fake_samples, fake_prompts, step
-                )
-
-                # Use RL gradients to adjust target for fake trajectory
-                # Key insight: DMD loss (velocity matching) already regularizes RL
-                # So we add RL signal to the velocity field prediction
-                if step >= self.rl_warmup_steps:
-                    # Scale RL gradients and add to target
-                    target[fake_mask] = target[fake_mask] - self.rl_weight * rl_grads
-
-                    # Optional: add explicit RL loss for logging
-                    rl_loss = -rl_grads.abs().mean() * self.rl_weight
-        # ============================================================
-
-        # Standard loss computation
         weighting = (torch.tan((1 - (t.abs() - tt.abs())) * np.pi / 2.5) + 1).flatten()
         weighting[sample_masks["adv"]] = 1
         loss = self.loss_func(F_th_t, target) * weighting
-
-        # Only calculate the multi-step generation loss
+        # Only calculate the multi-step generation loss (if self.eso = 0)
         mul_adv_idx = sample_masks["mul"] | sample_masks["adv"]
         if self.eso >= 1:
             loss = loss.mean()
@@ -490,11 +363,6 @@ class TwinFlow(torch.nn.Module):
             F_fake = F_th_t[opt_idx]
             e2e_loss = self.loss_func(F_fake, (F_fake - F_grad).data)
             loss = loss + e2e_loss.mean() * self.dmc
-
-        # Add RL loss if active
-        if isinstance(rl_loss, torch.Tensor) and rl_loss != 0:
-            loss = loss + rl_loss
-
         return loss
 
     def forward(

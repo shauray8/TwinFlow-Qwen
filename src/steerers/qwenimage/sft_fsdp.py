@@ -302,6 +302,8 @@ def main(_):
             batch = next(train_iter)[0]
             # NOTE: for editing training, just return additional ref image in batch
             text, image, z = batch["text"], batch["image"].cuda(), batch["z"]
+            
+            prompts = text # for reward
 
             # logger.info(text[:2])
             start_time = time.time()
@@ -348,6 +350,7 @@ def main(_):
                         uncond_prompt_embeds_mask],
                         step=(global_step - 1),
                         v=z,
+                        prompts = prompts,
                     )
 
                 scaled_loss = loss / effective_grad_accum_steps

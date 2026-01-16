@@ -20,6 +20,16 @@ method:
   estimate_order: 2
   loss_func_type: {"type": "barron_reweighting", "alpha": 1.0}
   dist_match_cof: 0.5
+  use_image_free: false
+  use_rl: true
+  rl_warmup_steps: 2000  # Start RL after 2K steps (cold start)
+  rl_weight: 0.05  # Conservative weight to avoid reward hacking
+  reward_model_type: "hpsv2"  # Options: hpsv2, pickscore, imagereward
+  reward_model_cache: "./reward_models_cache"
+
+  # NEW: Dynamic Cold Start Configuration
+  use_dynamic_renoise: true
+  renoise_schedule: [4.0, 1.0, 3000]  # [start_bias, end_bias, decay_steps]
 
 # few-step sampling
 sample:
