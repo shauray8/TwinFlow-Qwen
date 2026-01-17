@@ -1,86 +1,78 @@
 model:
-  model_name: QwenImage # modify to QwenImageEdit uses editing model
+  model_name: QwenImage
   aux_time_embed: true
-  model_path: path/to/Qwen-Image
+  model_path: Qwen/Qwen-Image-2512  # Use HF path or local path
 
 data:
-  height: 512
-  width: 512
-  train_dirs:
-    - path/to/data
+  # REMOVED: height and width (now dynamic per bucket)
+  # REMOVED: train_dirs (using HF dataset)
+  
+  # NEW: Bucketed dataset configuration
+  dataset_name: "FreedomIntelligence/ShareGPT-4o-Image"
+  bucket_metadata_path: "./data/sharegpt4o_bucketed/bucket_metadata.json"
+  image_dir: "./data/sharegpt4o_raw/images"  # Path to extracted images
     
 method:
   method_type: TwinFlow
   transport_type: Linear
   consistc_ratio: 1.0
   enhanced_ratio: 0.8
-  ema_decay_rate: 0.0 # because we did not load EMA model, so set to 0
+  ema_decay_rate: 0.0  # No EMA for FSDP training
   enhanced_range: [0.0, 1.0]
   time_dist_ctrl: [1.0, 1.0, 1.0]
   estimate_order: 2
   loss_func_type: {"type": "barron_reweighting", "alpha": 1.0}
   dist_match_cof: 0.5
   use_image_free: false
+  
+  # RL Configuration
   use_rl: true
-  rl_warmup_steps: 2000  # Start RL after 2K steps (cold start)
-  rl_weight: 0.05  # Conservative weight to avoid reward hacking
+  rl_warmup_steps: 2000  # Start RL after cold start
+  rl_weight: 0.05  # Conservative to avoid reward hacking
   reward_model_type: "hpsv2"  # Options: hpsv2, pickscore, imagereward
   reward_model_cache: "./reward_models_cache"
-
-  # NEW: Dynamic Cold Start Configuration
+  vae_for_rl: null  # Will be auto-set if model has VAE
+  
+  # Dynamic Cold Start Configuration
   use_dynamic_renoise: true
   renoise_schedule: [4.0, 1.0, 3000]  # [start_bias, end_bias, decay_steps]
 
-# few-step sampling
+# Few-step sampling (for demo images during training)
 sample:
   ckpt: "700"
   cfg_scale: 0
   cfg_interval: [0.00, 0.00]
-  sampling_steps: 2 # 1
-  stochast_ratio: 1.0 # 0.8
+  sampling_steps: 2
+  stochast_ratio: 1.0
   extrapol_ratio: 0.0
   sampling_order: 1
   time_dist_ctrl: [1.0, 1.0, 1.0]
   rfba_gap_steps: [0.001, 0.7]
   sampling_style: few
-
-# # any-step sampling
-# sample:
-#   ckpt: "700"
-#   cfg_scale: 0
-#   cfg_interval: [0.00, 0.00]
-#   sampling_steps: 4 # 8
-#   stochast_ratio: 0.0
-#   extrapol_ratio: 0.0
-#   sampling_order: 1
-#   time_dist_ctrl: [1.0, 1.0, 1.0]
-#   rfba_gap_steps: [0.001, 0.5]
-#   sampling_style: any
-
-# # multi-step sampling
-# sample:
-#   ckpt: "700"
-#   cfg_scale: 0
-#   cfg_interval: [0.00, 0.00]
-#   sampling_steps: 30
-#   stochast_ratio: 0.0
-#   extrapol_ratio: 0.0
-#   sampling_order: 1
-#   time_dist_ctrl: [1.17, 0.8, 1.1]
-#   rfba_gap_steps: [0.001, 0.0]
-#   sampling_style: mul
+  # Demo image generation will use bucket resolutions dynamically
 
 train:
   load_checkpoint_path: ""
+  save_checkpoint_path: "../outputs/"
   output_dir: ../outputs
   seed: 42
   grad_accumulation_steps: 1
-  micro_batch_size: 4
+  micro_batch_size: 4  # Per-GPU batch size (will be scaled by bucket)
   num_train_epochs: 4
   optimizer: adamw
   lr: 1.0e-5
-  betas:
-    - 0.9
-    - 0.99
+  betas: [0.9, 0.99]
   weight_decay: 0.0
   max_grad_norm: 1.0
+  
+  use_wandb: true
+  wandb_project: "twinflow-qwen-image"  # Your project name
+  wandb_entity: null  # Your username/team (null = default)
+  wandb_run_name: null  # Auto-generate if null
+  wandb_tags: ["twinflow", "rl", "bucketed"]  # Optional tags
+  wandb_log_interval: 10  # Log every N steps
+
+# Optional: Dynamic batch sizing per bucket
+# Automatically computed based on pixel count
+batch_size_strategy: "dynamic"  # Options: "fixed", "dynamic"
+base_resolution: [1328, 1328]  # Reference resolution for batch size

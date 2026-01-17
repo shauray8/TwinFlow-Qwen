@@ -402,6 +402,7 @@ class QwenImage(torch.nn.Module):
         latents = x_cur / x_cur_std + x_cur_mean
         pixels = self.model.vae.decode(latents, return_dict=False)[0][:, :, 0]
         return pixels
+    
 
     @torch.no_grad()
     def sample(

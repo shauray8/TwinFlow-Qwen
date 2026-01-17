@@ -38,6 +38,7 @@ class TwinFlow(torch.nn.Module):
         # --- Dynamic Cold Start Parameters ---
         use_dynamic_renoise: bool = False,
         renoise_schedule: List[float] = [0.8, 0.2, 3000],  # [start_bias, end_bias, total_steps]
+        vae_for_rl: nn.Module = None,
         **kwargs,
     ):
         super().__init__()
@@ -53,6 +54,7 @@ class TwinFlow(torch.nn.Module):
         self.lfa = loss_func_args
         self.dmc = dist_match_cof
         self.uif = use_image_free
+        self.vae_for_rl = vae_for_rl
 
         # RL setup
         self.use_rl = use_rl
@@ -221,16 +223,18 @@ class TwinFlow(torch.nn.Module):
 
         # 5. Adversarial Generation Phase
         if (m := masks.get("adv")) is not None and m.any():
-            tt[m] = -t[m]  # Flag logic
-            # Generate fake samples (t=1 -> t=0) to replace inputs
+            tt[m] = -t[m]
+            
+            # Generate fake samples with proper dtype handling
             x_fake, _, _, _ = self.forward(
                 model,
-                torch.randn_like(x[m]),
-                torch.ones_like(t[m]),
-                torch.zeros_like(t[m]),
-                **dict(c=[ic[m] for ic in c]),
+                torch.randn_like(x[m]).to(x.dtype),  # Match input dtype
+                torch.ones_like(t[m]).to(t.dtype),
+                torch.zeros_like(t[m]).to(t.dtype),
+                **dict(c=[ic[m].to(ic.dtype) if torch.is_tensor(ic) else ic for ic in c]),
             )
-            x[m] = x_fake.data
+            x[m] = x_fake.data.to(x.dtype) 
+        
 
         # 6. Construct Training Targets
         z = torch.randn_like(x)
@@ -378,10 +382,12 @@ class TwinFlow(torch.nn.Module):
             )
             logger.info(f"Initialized reward model: {self.reward_model_type}")
 
+        fake_pixels = model.latents_to_pixels(fake_samples)  # (B, 3, H_img, W_img)
+
         # Compute gradients through reward model
         rl_grads = compute_reward_gradients(
             self.reward_model,
-            fake_samples,
+            fake_pixels,
             prompts,
         )
 
@@ -397,6 +403,8 @@ class TwinFlow(torch.nn.Module):
         v: torch.Tensor,
         prompts: list[str] = None,  # NEW: need prompts for reward
     ):
+
+        
         with torch.no_grad():
             x_t, t, tt, c, e, target, sample_masks = self.prepare_inputs(
                 model, x, c, e, step=step  # Pass step
@@ -450,21 +458,31 @@ class TwinFlow(torch.nn.Module):
             # Get prompts for fake samples
             if prompts is not None:
                 fake_prompts = [prompts[i] for i in range(len(prompts)) if fake_mask[i]]
-
-                # Compute RL gradients through reward model
-                rl_grads = self.compute_rl_gradients(
-                    model, fake_samples, fake_prompts, step
-                )
-
-                # Use RL gradients to adjust target for fake trajectory
-                # Key insight: DMD loss (velocity matching) already regularizes RL
-                # So we add RL signal to the velocity field prediction
-                if step >= self.rl_warmup_steps:
-                    # Scale RL gradients and add to target
-                    target[fake_mask] = target[fake_mask] - self.rl_weight * rl_grads
-
-                    # Optional: add explicit RL loss for logging
-                    rl_loss = -rl_grads.abs().mean() * self.rl_weight
+                if self.vae_for_rl is not None:
+                    with torch.no_grad():
+                        fake_pixels = self.vae_for_rl.decode(
+                            fake_latents / self.vae_for_rl.config.scaling_factor
+                        ).sample
+                    
+                    # Compute RL on pixels
+                    rl_grads_pixels = self.compute_rl_gradients(
+                        model, fake_pixels, fake_prompts, step
+                    )
+                    
+                    # Encode gradients back to latent space
+                    with torch.no_grad():
+                        # Apply gradient to pixels
+                        pixels_modified = (fake_pixels - self.rl_weight * rl_grads_pixels).clamp(-1, 1)
+                        # Encode back
+                        latents_modified = self.vae_for_rl.encode(pixels_modified).latent_dist.sample()
+                        latents_modified = latents_modified * self.vae_for_rl.config.scaling_factor
+                        # Gradient = original - modified
+                        rl_grads_latent = fake_latents - latents_modified
+                    
+                    target[fake_mask] = target[fake_mask] + rl_grads_latent  # Note: + not -
+                    rl_loss = rl_grads_latent.abs().mean() * self.rl_weight
+                else:
+                    pass
         # ============================================================
 
         # Standard loss computation
