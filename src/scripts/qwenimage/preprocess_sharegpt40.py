@@ -1,8 +1,3 @@
-"""
-Final preprocessing for ShareGPT-4o-Image dataset.
-Handles the specific structure: input_prompt, output_image, output_image_resolution
-"""
-
 import os
 import json
 import argparse
@@ -14,11 +9,8 @@ import numpy as np
 from datasets import load_dataset
 import yaml
 
-
 def calculate_aspect_ratio(width: int, height: int) -> float:
-    """Calculate aspect ratio (height/width)"""
     return height / width
-
 
 def find_best_bucket(
     img_width: int,
@@ -26,11 +18,9 @@ def find_best_bucket(
     buckets: List[Dict],
     fallback: str = "closest"
 ) -> Optional[Dict]:
-    """Find the best bucket for an image using intelligent matching."""
     img_ar = calculate_aspect_ratio(img_width, img_height)
     img_pixels = img_width * img_height
     
-    # Find all matching buckets within tolerance
     matches = []
     for bucket in buckets:
         bucket_ar = bucket['aspect_ratio']
@@ -62,7 +52,6 @@ def find_best_bucket(
     else:
         return None
 
-
 def calculate_smart_crop(
     img_width: int,
     img_height: int,
@@ -70,18 +59,12 @@ def calculate_smart_crop(
     target_height: int,
     strategy: str = "center_weighted"
 ) -> Tuple[int, int, int, int, int, int]:
-    """
-    Calculate smart crop that preserves important content.
-    Returns: (resize_w, resize_h, crop_l, crop_t, crop_r, crop_b)
-    """
     img_ar = img_width / img_height
     target_ar = target_width / target_height
     
     if img_ar > target_ar:
-        # Image is wider - fit height, crop width
         new_height = target_height
         new_width = int(target_height * img_ar)
-        
         if strategy == "center_weighted":
             crop_left = int((new_width - target_width) * 0.5)
         else:
@@ -92,12 +75,10 @@ def calculate_smart_crop(
         crop_bottom = target_height
         
     else:
-        # Image is taller - fit width, crop height
         new_width = target_width
         new_height = int(target_width / img_ar)
         
         if strategy == "center_weighted":
-            # Slightly prefer upper-center for portraits
             crop_top = int((new_height - target_height) * 0.45)
         else:
             crop_top = (new_height - target_height) // 2
@@ -108,17 +89,13 @@ def calculate_smart_crop(
     
     return (new_width, new_height, crop_left, crop_top, crop_right, crop_bottom)
 
-
 def preprocess_dataset(
     dataset_name: str,
     output_dir: str,
     bucket_config_path: str,
     split: str = "train",
     max_samples: int = None,
-):
-    """Preprocess dataset with intelligent bucketing."""
-    
-    # Load bucket config
+):    
     with open(bucket_config_path, 'r') as f:
         config = yaml.safe_load(f)
     
@@ -138,7 +115,6 @@ def preprocess_dataset(
     print(f"Buckets: {len(buckets)}")
     print(f"Fallback strategy: {fallback_strategy}")
     
-    # Initialize storage
     bucket_data = defaultdict(list)
     bucket_stats = defaultdict(lambda: {
         'count': 0,
@@ -151,38 +127,29 @@ def preprocess_dataset(
     skipped_missing_data = 0
     skipped_errors = 0
     
-    # Process each sample
     for idx in tqdm(range(len(dataset)), desc="Processing samples"):
         try:
             sample = dataset[idx]
-            
-            # Extract data from ShareGPT-4o-Image format
-            # Format: {'input_prompt': str, 'output_image': str, 'output_image_resolution': [w, h]}
-            
+
             if 'input_prompt' not in sample or 'output_image_resolution' not in sample:
                 skipped_missing_data += 1
                 continue
-            
             text = sample['input_prompt']
-            image_path = sample['output_image']  # e.g., "image/8483.png"
-            resolution = sample['output_image_resolution']  # [width, height]
+            image_path = sample['output_image']  
+            resolution = sample['output_image_resolution']
             
             if len(resolution) != 2:
                 skipped_missing_data += 1
                 continue
             
             img_width, img_height = resolution[0], resolution[1]
-            
-            # Validate dimensions
             if img_width <= 0 or img_height <= 0:
                 skipped_missing_data += 1
                 continue
-            
-            # Find best bucket
+           
             best_bucket = find_best_bucket(
                 img_width, img_height, buckets, fallback_strategy
             )
-            
             if best_bucket is None:
                 skipped_no_bucket += 1
                 continue
@@ -190,7 +157,6 @@ def preprocess_dataset(
             target_width = best_bucket['width']
             target_height = best_bucket['height']
             
-            # Check scale factor
             img_pixels = img_width * img_height
             target_pixels = target_width * target_height
             scale_factor = (target_pixels / img_pixels) ** 0.5
@@ -198,20 +164,17 @@ def preprocess_dataset(
             if scale_factor > max_scale_factor:
                 skipped_extreme_scale += 1
                 continue
-            
-            # Calculate smart crop parameters
             resize_w, resize_h, crop_l, crop_t, crop_r, crop_b = calculate_smart_crop(
                 img_width, img_height,
                 target_width, target_height,
                 strategy=crop_strategy
             )
-            
-            # Store metadata
+           
             bucket_key = best_bucket['name']
             bucket_data[bucket_key].append({
                 'index': idx,
                 'text': text,
-                'image_path': image_path,  # Store the path for loading later
+                'image_path': image_path,
                 'original_width': img_width,
                 'original_height': img_height,
                 'bucket_name': bucket_key,
@@ -226,18 +189,16 @@ def preprocess_dataset(
                 'scale_factor': scale_factor,
             })
             
-            # Update stats
             bucket_stats[bucket_key]['count'] += 1
             bucket_stats[bucket_key]['total_pixels'] += target_pixels
             bucket_stats[bucket_key]['scale_samples'].append(scale_factor)
             
         except Exception as e:
             skipped_errors += 1
-            if idx < 5:  # Debug first few errors
+            if idx < 5:
                 print(f"Error processing sample {idx}: {e}")
             continue
     
-    # Calculate average scale factors
     for bucket_key in bucket_stats:
         scales = bucket_stats[bucket_key]['scale_samples']
         if scales:
@@ -251,12 +212,7 @@ def preprocess_dataset(
         if len(v) >= min_bucket_size
     }
     
-    # Print statistics
-    print("\n" + "="*80)
-    print("BUCKET STATISTICS")
-    print("="*80)
     print(f"{'Bucket':<10} {'Size':<8} {'Resolution':<12} {'Pixels':<10} {'Avg Scale':<12}")
-    print("-"*80)
     
     total_kept = 0
     for bucket_key in sorted(filtered_buckets.keys()):
@@ -274,7 +230,6 @@ def preprocess_dataset(
         print(f"{bucket_key:<10} {count:<8} {w}x{h:<7} {pixels:<10} "
               f"{avg_scale:.3f}±{std_scale:.3f}")
     
-    print("-"*80)
     print(f"Total kept: {total_kept}")
     print(f"Skipped (extreme scale): {skipped_extreme_scale}")
     print(f"Skipped (no bucket): {skipped_no_bucket}")
@@ -284,9 +239,7 @@ def preprocess_dataset(
     print(f"Total skipped: {total_skipped}")
     if len(dataset) > 0:
         print(f"Keep rate: {100 * total_kept / len(dataset):.2f}%")
-    print("="*80)
-    
-    # Save metadata
+   
     os.makedirs(output_dir, exist_ok=True)
     
     metadata_path = os.path.join(output_dir, 'bucket_metadata.json')
@@ -312,11 +265,9 @@ def preprocess_dataset(
             'keep_rate': 100 * total_kept / len(dataset) if len(dataset) > 0 else 0,
         }, f, indent=2)
     
-    print(f"\nMetadata saved to: {metadata_path}")
+    print(f"Metadata saved to: {metadata_path}")
     print(f"Stats saved to: {stats_path}")
-    
     return filtered_buckets
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
