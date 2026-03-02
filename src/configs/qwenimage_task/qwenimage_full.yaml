@@ -1,16 +1,12 @@
 model:
   model_name: QwenImage
   aux_time_embed: true
-  model_path: Qwen/Qwen-Image-2512  # Use HF path or local path
+  model_path: Qwen/Qwen-Image-2512
 
 data:
-  # REMOVED: height and width (now dynamic per bucket)
-  # REMOVED: train_dirs (using HF dataset)
-  
-  # NEW: Bucketed dataset configuration
   dataset_name: "FreedomIntelligence/ShareGPT-4o-Image"
   bucket_metadata_path: "./data/sharegpt4o_bucketed/bucket_metadata.json"
-  image_dir: "./data/sharegpt4o_raw/images"  # Path to extracted images
+  image_dir: "./data/sharegpt4o_raw/images"
     
 method:
   method_type: TwinFlow
@@ -27,17 +23,16 @@ method:
   
   # RL Configuration
   use_rl: true
-  rl_warmup_steps: 2000  # Start RL after cold start
-  rl_weight: 0.05  # Conservative to avoid reward hacking
-  reward_model_type: "hpsv2"  # Options: hpsv2, pickscore, imagereward
+  rl_warmup_steps: 2000
+  rl_weight: 0.05 
+  reward_model_type: "hpsv2" 
   reward_model_cache: "./reward_models_cache"
-  vae_for_rl: null  # Will be auto-set if model has VAE
+  vae_for_rl: null 
   
   # Dynamic Cold Start Configuration
-  use_dynamic_renoise: true
+  use_dynamic_renoise: True
   renoise_schedule: [4.0, 1.0, 3000]  # [start_bias, end_bias, decay_steps]
 
-# Few-step sampling (for demo images during training)
 sample:
   ckpt: "700"
   cfg_scale: 0
@@ -47,9 +42,8 @@ sample:
   extrapol_ratio: 0.0
   sampling_order: 1
   time_dist_ctrl: [1.0, 1.0, 1.0]
-  rfba_gap_steps: [0.001, 0.7]
+  rfba_gap_steps: [0.001, 0.5]
   sampling_style: few
-  # Demo image generation will use bucket resolutions dynamically
 
 train:
   load_checkpoint_path: ""
@@ -57,22 +51,26 @@ train:
   output_dir: ../outputs
   seed: 42
   grad_accumulation_steps: 1
-  micro_batch_size: 4  # Per-GPU batch size (will be scaled by bucket)
-  num_train_epochs: 4
+  micro_batch_size: 4
+  num_train_epochs: 8
   optimizer: adamw
-  lr: 1.0e-5
+  lr: 1.0e-4
   betas: [0.9, 0.99]
   weight_decay: 0.0
-  max_grad_norm: 1.0
+  max_grad_norm: 10.0 
   
   use_wandb: true
-  wandb_project: "twinflow-qwen-image"  # Your project name
-  wandb_entity: null  # Your username/team (null = default)
-  wandb_run_name: null  # Auto-generate if null
-  wandb_tags: ["twinflow", "rl", "bucketed"]  # Optional tags
-  wandb_log_interval: 10  # Log every N steps
+  wandb_project: "twinflow-qwen-image"
+  wandb_entity: null
+  wandb_run_name: null
+  wandb_tags: [""]
+  wandb_log_interval: 10
 
-# Optional: Dynamic batch sizing per bucket
-# Automatically computed based on pixel count
+  hf_hub:
+    use_hf_hub: true
+    repo_id: ""
+    token: "" 
+    upload_interval: 1000
+
 batch_size_strategy: "dynamic"  # Options: "fixed", "dynamic"
-base_resolution: [1328, 1328]  # Reference resolution for batch size
+base_resolution: [1328, 1328]

@@ -1,13 +1,10 @@
-# High-resolution buckets for Qwen-Image
 buckets:
-  # [height, width, min_aspect_ratio, max_aspect_ratio, tolerance]
-  
   # Square (1:1)
   - name: "1:1"
     height: 1328
     width: 1328
     aspect_ratio: 1.0
-    tolerance: 0.15  # Accept 0.85-1.15 AR (quite flexible for square)
+    tolerance: 0.15 
   
   # Landscape 16:9
   - name: "16:9"
@@ -51,20 +48,10 @@ buckets:
     aspect_ratio: 1.5  # 1584/1056
     tolerance: 0.08
 
-# Fallback strategy for images that don't fit any bucket
 fallback_strategy: "closest"  # Options: "closest", "crop_to_square", "skip"
-
-# Minimum samples per bucket (buckets with fewer samples merged/removed)
 min_bucket_size: 50
-
-# Maximum resize scale (avoid extreme upscaling)
 max_scale_factor: 1.5
-
-# Training batch size will be adjusted by total pixels
-# Base batch size at 1328x1328 pixels
 base_batch_size: 4
 base_pixels: 1763584  # 1328*1328
-
-# Enable smart cropping (minimal information loss)
 smart_crop: true
 crop_strategy: "center_weighted"  # Options: "center", "center_weighted", "entropy"
